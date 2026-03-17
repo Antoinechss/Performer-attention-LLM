@@ -1,10 +1,14 @@
+import torch 
+from torch import nn 
+from typing import Optional
+
+
 @use_kernelized_func(apply_rotary_pos_emb)
 class LlamaPerformerAttention(nn.Module): 
     """Performer Attention adapted class for TinyLlama Model"""
     super().__init__()
     self.config = config
     self.layer_idx = layer_idx
-    pass 
 
 
 
