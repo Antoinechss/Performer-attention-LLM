@@ -7,12 +7,14 @@ class PerformerAttention(nn.Module):
     def __init__(self, dim, num_heads, head_dim, num_features):
         super().__init__()
 
-        self.dim = dim  # Size of token embeddings
-        self.num_heads = num_heads
-        self.head_dim = head_dim  # Dimension of each query/key/value vector within one head
-        self.num_features = num_features  # nb of features used for approximation
+        self.dim = dim  # Size of token embeddings, dim
+        self.num_heads = num_heads  # H
+        self.head_dim = (
+            head_dim  # Dimension of each query/key/value vector within one head, D
+        )
+        self.num_features = num_features  # nb of features used for approximation, M
 
-        self.sample_features_gaussian() # Sample omega and store it in class variables
+        self.sample_features_gaussian()  # Sample omega and store it in class variables
 
         # total dimension of all attention heads combined
         inner_dim = num_heads * head_dim
@@ -21,8 +23,9 @@ class PerformerAttention(nn.Module):
         self.q_proj = nn.Linear(dim, inner_dim, bias=False)  # Q = XWq
         self.k_proj = nn.Linear(dim, inner_dim, bias=False)  # K = XWk
         self.v_proj = nn.Linear(dim, inner_dim, bias=False)  # V = XWv
-        self.out_proj = nn.Linear(self.num_heads * self.head_dim, self.dim) # original dimensions [B, N, H*D]
-
+        self.out_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.dim
+        )  # original dimensions [B, N, H*D]
 
     def sample_features_gaussian(self):
         """
@@ -30,11 +33,23 @@ class PerformerAttention(nn.Module):
         omega.shape = [m, d] = [num_features, head_dim]
         """
         omega = torch.randn(self.num_features, self.head_dim)
-        self.register_buffer("omega", omega) # adds omega to set of class variables
+        self.register_buffer("omega", omega)  # adds omega to set of class variables
 
     def sample_features_ORF(self):
-        """Orthogonal Random Feature implementation (FAVOR+)"""
-        pass
+        """
+        Orthogonal Random Feature implementation (FAVOR+)
+        omega.shape = [num_features, head_dim]
+        Builds Omega by stacking orthogonal blocks of size [D, D]
+        """
+        blocks = []
+        # Generate blocks until num_features is reached
+        while len(blocks) * self.head_dim < self.num_features:
+            G = torch.randn(self.head_dim, self.head_dim)  # Sample a gaussian matrix
+            Q, _ = torch.linalg.qr(G)  # QR decomposition: provides orthogonal matrix Q
+            blocks.append(Q.T)  # Rows of Q.T are orthonormal vectors, each row = one orthonormal feature direction 
+        stacked_blocks = torch.cat(blocks, dim=0) # [k * D, D]
+        Omega = stacked_blocks[: self.num_features] # Trim to desired number of features to get [M, D]
+        return Omega
 
     def phi(self, x):
         # Project x onto approximation space : compute wi^T * x for i in [1, m]
@@ -45,17 +60,17 @@ class PerformerAttention(nn.Module):
         norm_x = 0.5 * (x**2).sum(dim=-1, keepdim=True)
         phi = torch.exp(proj_x - norm_x) / math.sqrt(self.num_features)
         return phi
-    
-    def reshape_heads(self, x): 
-        """ Reshapes projected vector from [B, N, H*D] to [B, H, N, D]"""
+
+    def reshape_heads(self, x):
+        """Reshapes projected vector from [B, N, H*D] to [B, H, N, D]"""
         B, N, _ = x.shape
-        return x.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)  
-    
-    def forward(self, x): 
+        return x.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def forward(self, x):
         B, N, _ = x.shape
 
         # Compute key, query and value matrices: shape [B, N, H*D]
-        q = self.q_proj(x) 
+        q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
 
@@ -72,11 +87,11 @@ class PerformerAttention(nn.Module):
         kv = torch.einsum("bhnm,bhnd->bhmd", phi_k, v)
 
         # Normalization term (summing on all tokens)
-        k_sum = phi_k.sum(dim=2) # [B, H, M]
-        z = 1 / (torch.einsum("bhnm,bhm->bhn", phi_q, k_sum) + 1e-6) # [B, H, N]
+        k_sum = phi_k.sum(dim=2)  # [B, H, M]
+        z = 1 / (torch.einsum("bhnm,bhm->bhn", phi_q, k_sum) + 1e-6)  # [B, H, N]
 
         # final attention output, [B, H, N, D]
-        out = torch.einsum("bhnm,bhmd,bhn->bhnd", phi_q, kv, z) 
+        out = torch.einsum("bhnm,bhmd,bhn->bhnd", phi_q, kv, z)
 
         # merge heads back, [B, N, H*D]
         out = out.transpose(1, 2).contiguous().view(B, N, -1)
@@ -85,18 +100,11 @@ class PerformerAttention(nn.Module):
         out = self.out_proj(out)
 
         return out
-    
-    
+
+
 # --------------- TEST -------------------
 
 model = PerformerAttention(dim=64, num_heads=4, head_dim=16, num_features=32)
 x = torch.randn(2, 10, 64)  # [B, N, dim]
 out = model(x)
 print(out.shape)
-
-
-
-
-
- 
-
