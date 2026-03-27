@@ -124,10 +124,12 @@ class PerformerAttentionCore(nn.Module):
             blocks.append(Q.T)
 
         omega = torch.cat(blocks, dim=0)[:self.num_features]
-        self.register_buffer("omega", omega)
+        self.register_buffer("omega", omega, persistent=False)
 
     def phi(self, x):
-        proj_x = torch.einsum("bhnd,md->bhnm", x, self.omega)
+        # Ensure omega is on same device and dtype as input
+        omega = self.omega.to(device=x.device, dtype=x.dtype)
+        proj_x = torch.einsum("bhnd,md->bhnm", x, omega)
         norm_x = 0.5 * (x**2).sum(dim=-1, keepdim=True)
         return torch.exp(proj_x - norm_x) / math.sqrt(self.num_features)
 
@@ -142,7 +144,9 @@ class PerformerAttentionCore(nn.Module):
 
         out = torch.einsum("bhnm,bhnmd->bhnd", phi_q, kv_cumsum)
 
-        denom = torch.einsum("bhnm,bhnm->bhn", phi_q, k_cumsum) + 1e-6
+        denom = torch.einsum(
+            "bhnm,bhnm->bhn", phi_q, k_cumsum
+        ) + 1e-6
         out = out / denom.unsqueeze(-1)
 
         return out
