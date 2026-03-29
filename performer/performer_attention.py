@@ -119,7 +119,7 @@ class PerformerAttentionCore(nn.Module):
         device = torch.device("cpu") 
 
         while len(blocks) * self.head_dim < self.num_features:
-            G = torch.randn(self.head_dim, self.head_dim, device=device)
+            G = torch.randn(self.head_dim, self.head_dim, device=device, dtype=torch.float32)
             Q, _ = torch.linalg.qr(G)
             blocks.append(Q.T)
 
@@ -134,21 +134,24 @@ class PerformerAttentionCore(nn.Module):
         return torch.exp(proj_x - norm_x) / math.sqrt(self.num_features)
 
     def forward(self, q, k, v):
-        phi_q = self.phi(q)
-        phi_k = self.phi(k)
+        phi_q = self.phi(q)  # [B, H, N_q, M]
+        phi_k = self.phi(k)  # [B, H, N_k, M]
 
-        kv = torch.einsum("bhnm,bhnd->bhnmd", phi_k, v)
+        if q.shape[2] == k.shape[2]:
+            # Prefill / training: causal attention via cumulative sum
+            kv = torch.einsum("bhnm,bhnd->bhnmd", phi_k, v)
+            kv_cumsum = kv.cumsum(dim=2)
+            k_cumsum = phi_k.cumsum(dim=2)
+            out = torch.einsum("bhnm,bhnmd->bhnd", phi_q, kv_cumsum)
+            denom = torch.einsum("bhnm,bhnm->bhn", phi_q, k_cumsum) + 1e-6
+        else:
+            # Decoding: N_q=1, attend over all cached keys/values
+            kv_sum = torch.einsum("bhnm,bhnd->bhmd", phi_k, v)   # [B, H, M, D]
+            k_sum = phi_k.sum(dim=2)                               # [B, H, M]
+            out = torch.einsum("bhnm,bhmd->bhnd", phi_q, kv_sum)  # [B, H, N_q, D]
+            denom = torch.einsum("bhnm,bhm->bhn", phi_q, k_sum) + 1e-6  # [B, H, N_q]
 
-        kv_cumsum = kv.cumsum(dim=2)
-        k_cumsum = phi_k.cumsum(dim=2)
-
-        out = torch.einsum("bhnm,bhnmd->bhnd", phi_q, kv_cumsum)
-
-        denom = torch.einsum(
-            "bhnm,bhnm->bhn", phi_q, k_cumsum
-        ) + 1e-6
         out = out / denom.unsqueeze(-1)
-
         return out
 
 # --------------- TEST ---------------------
