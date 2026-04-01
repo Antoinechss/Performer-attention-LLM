@@ -1,6 +1,20 @@
 import torch
 from torch import nn
 import math
+import importlib.util as _ilu
+import os as _os
+
+# Load Triton scan kernel if available (CUDA only, requires: pip install triton)
+try:
+    _ts_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'triton_scan.py')
+    _ts_spec = _ilu.spec_from_file_location('performer_triton_scan', _ts_path)
+    _ts_mod  = _ilu.module_from_spec(_ts_spec)
+    _ts_spec.loader.exec_module(_ts_mod)
+    _triton_scan = _ts_mod.triton_scan_forward
+    _HAS_TRITON  = _ts_mod._TRITON_AVAILABLE
+except Exception:
+    _HAS_TRITON  = False
+    _triton_scan = None
 
 """
 First full generic implementation of a Performer Attention framework, 
@@ -100,6 +114,26 @@ class PerformerAttention(nn.Module):
         return out
 
 
+def _python_scan(phi_q: torch.Tensor, phi_k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """
+    FAVOR+ causal sequential scan — pure Python/PyTorch fallback.
+    Used on CPU / MPS when Triton is not available.
+    O(M×D) memory: never materialises the [N, M, D] cumsum tensor.
+    """
+    B, H, N, M = phi_q.shape
+    D = v.shape[-1]
+    S = torch.zeros(B, H, M, D, dtype=phi_q.dtype, device=phi_q.device)
+    z = torch.zeros(B, H, M,    dtype=phi_q.dtype, device=phi_q.device)
+    out = torch.empty(B, H, N, D, dtype=phi_q.dtype, device=phi_q.device)
+    for i in range(N):
+        S = S + torch.einsum("bhm,bhd->bhmd", phi_k[:, :, i], v[:, :, i])
+        z = z + phi_k[:, :, i]
+        num   = torch.einsum("bhm,bhmd->bhd", phi_q[:, :, i], S)
+        denom = (phi_q[:, :, i] * z).sum(-1, keepdim=True) + 1e-6
+        out[:, :, i] = num / denom
+    return out
+
+
 """
 Implements the core mechanisms of performer FAVOR+ attention
 This class does not handle the projections, or anything model specific (masking, RoPE etc)
@@ -138,20 +172,28 @@ class PerformerAttentionCore(nn.Module):
         phi_k = self.phi(k)  # [B, H, N_k, M]
 
         if q.shape[2] == k.shape[2]:
-            # Prefill / training: causal attention via cumulative sum
-            kv = torch.einsum("bhnm,bhnd->bhnmd", phi_k, v)
-            kv_cumsum = kv.cumsum(dim=2)
-            k_cumsum = phi_k.cumsum(dim=2)
-            out = torch.einsum("bhnm,bhnmd->bhnd", phi_q, kv_cumsum)
-            denom = torch.einsum("bhnm,bhnm->bhn", phi_q, k_cumsum) + 1e-6
-        else:
-            # Decoding: N_q=1, attend over all cached keys/values
-            kv_sum = torch.einsum("bhnm,bhnd->bhmd", phi_k, v)   # [B, H, M, D]
-            k_sum = phi_k.sum(dim=2)                               # [B, H, M]
-            out = torch.einsum("bhnm,bhmd->bhnd", phi_q, kv_sum)  # [B, H, N_q, D]
-            denom = torch.einsum("bhnm,bhm->bhn", phi_q, k_sum) + 1e-6  # [B, H, N_q]
+            # Prefill: causal FAVOR+ via sequential scan.
+            # Cast to float32 for accumulator stability, then cast back.
+            pq = phi_q.float()
+            pk = phi_k.float()
+            vf = v.float()
 
-        out = out / denom.unsqueeze(-1)
+            if _HAS_TRITON and q.device.type == "cuda":
+                # Single fused GPU kernel — no Python loop overhead
+                out = _triton_scan(pq, pk, vf)
+            else:
+                # CPU / MPS fallback — Python loop, O(M×D) memory
+                out = _python_scan(pq, pk, vf)
+
+            out = out.to(q.dtype)
+        else:
+            # Decoding: N_q=1, full KV cache already accumulated
+            kv_sum = torch.einsum("bhnm,bhnd->bhmd", phi_k, v)            # [B, H, M, D]
+            k_sum  = phi_k.sum(dim=2)                                       # [B, H, M]
+            num    = torch.einsum("bhnm,bhmd->bhnd", phi_q, kv_sum)        # [B, H, 1, D]
+            denom  = torch.einsum("bhnm,bhm->bhn",   phi_q, k_sum) + 1e-6 # [B, H, 1]
+            out    = num / denom.unsqueeze(-1)
+
         return out
 
 # --------------- TEST ---------------------
