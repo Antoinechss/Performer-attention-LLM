@@ -107,7 +107,7 @@ class PerformerAttentionCore(nn.Module):
         super().__init__()
         self.head_dim = head_dim
         self.num_features = num_features
-        self.register_buffer("omega", _sample_orf(head_dim, num_features), persistent=False)
+        self.register_buffer("omega", _sample_orf(head_dim, num_features), persistent=True)
 
     def phi(self, x, is_query=True):
         return _phi(x, self.omega, self.num_features, is_query)
@@ -120,7 +120,7 @@ class PerformerAttentionCore(nn.Module):
         if q.shape[2] == k.shape[2]:
             # Prefill: causal scan
             pq, pk, vf = phi_q.float(), phi_k.float(), v.float()
-            if _HAS_TRITON and q.device.type == "cuda":
+            if _HAS_TRITON and q.device.type == "cuda" and not self.training:
                 out = _triton_scan(pq, pk, vf)
             else:
                 out = _python_scan(pq, pk, vf)
