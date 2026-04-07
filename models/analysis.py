@@ -5,7 +5,7 @@ Performer vs standard attention analysis.
   B — Speed benchmarks: B1 prefill scaling, B2 decode step
   C — Mixed-head quality sweep (requires model load)
 """
-import sys, os, time, importlib.util
+import sys, os, time
 import torch
 import torch.nn.functional as F
 
@@ -20,51 +20,142 @@ RUN_B = True
 RUN_C = False
 # ────────────────────────────────────────────────────────────────────────────
 
+# ── Performer core (standalone, no HF dependency) ──────────────────────────
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+_performer_dir = os.path.join(_project_root, 'performer')
+if _performer_dir not in sys.path:
+    sys.path.insert(0, _performer_dir)
+from performer_attention import PerformerAttentionCore, _HAS_TRITON
+
+
+# ── Mixed-head attention wrapper (patches a standard HF LlamaAttention) ────
+class MixedPerformerAttention(torch.nn.Module):
+    """Wraps a HuggingFace LlamaAttention, routing some heads through FAVOR+."""
+
+    def __init__(self, original_attn, num_performer_heads):
+        super().__init__()
+        self.original = original_attn
+        self.head_dim = original_attn.head_dim
+        self.num_heads = original_attn.config.num_attention_heads
+        self.num_key_value_heads = original_attn.config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.scaling = self.head_dim ** -0.5
+        self.num_performer_heads = num_performer_heads
+        self.num_standard_heads = self.num_heads - num_performer_heads
+
+        self.q_proj = original_attn.q_proj
+        self.k_proj = original_attn.k_proj
+        self.v_proj = original_attn.v_proj
+        self.o_proj = original_attn.o_proj
+
+        self.performer_core = PerformerAttentionCore(
+            head_dim=self.head_dim, num_features=256
+        )
+
+        # Copy attributes needed by HF internals
+        self.config = original_attn.config
+        self.layer_idx = original_attn.layer_idx
+        self.is_causal = True
+
+    def _rotate_half(self, x):
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def _apply_rotary(self, q, k, cos, sin):
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
+        q_embed = (q * cos) + (self._rotate_half(q) * sin)
+        k_embed = (k * cos) + (self._rotate_half(k) * sin)
+        return q_embed, k_embed
+
+    def forward(self, hidden_states, position_embeddings=None,
+                attention_mask=None, past_key_values=None, **kwargs):
+        B, N, _ = hidden_states.shape
+
+        q = self.q_proj(hidden_states).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(B, N, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(B, N, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        q, k = self._apply_rotary(q, k, cos, sin)
+
+        if past_key_values is not None:
+            k, v = past_key_values.update(k, v, self.layer_idx)
+
+        # Expand K/V for GQA
+        if self.num_key_value_groups > 1:
+            k = k.repeat_interleave(self.num_key_value_groups, dim=1)
+            v = v.repeat_interleave(self.num_key_value_groups, dim=1)
+
+        if self.num_standard_heads == 0:
+            # All performer
+            attn_out = self.performer_core(q, k, v)
+        elif self.num_performer_heads == 0:
+            # All standard
+            w = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) * self.scaling, dim=-1)
+            if attention_mask is not None:
+                w = w + attention_mask
+            attn_out = torch.matmul(w, v)
+        else:
+            # Mixed: first K heads → FAVOR+, rest → softmax
+            Kp = self.num_performer_heads
+            out_p = self.performer_core(q[:, :Kp], k[:, :Kp], v[:, :Kp])
+
+            q_s, k_s, v_s = q[:, Kp:], k[:, Kp:], v[:, Kp:]
+            scores = torch.matmul(q_s, k_s.transpose(-2, -1)) * self.scaling
+            if attention_mask is not None:
+                scores = scores + attention_mask
+            w = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q_s.dtype)
+            out_s = torch.matmul(w, v_s)
+
+            attn_out = torch.cat([out_p, out_s], dim=1)
+
+        attn_out = attn_out.transpose(1, 2).contiguous().reshape(B, N, -1)
+        return self.o_proj(attn_out), None
+
+
 # ── Model loading (Sections A & C only) ─────────────────────────────────────
 if RUN_A or RUN_C:
+    # Ensure we import HuggingFace transformers, not the local directory
+    _saved_path = sys.path[:]
+    sys.path = [p for p in sys.path
+                if os.path.abspath(p) != _project_root
+                and os.path.abspath(p) != os.path.abspath(os.path.dirname(__file__))]
+    if '' in sys.path:
+        sys.path.remove('')
+    # Also remove CWD if it resolves to project root
+    cwd = os.path.abspath(os.getcwd())
+    sys.path = [p for p in sys.path if os.path.abspath(p) != cwd or cwd != _project_root]
+
     from transformers import AutoTokenizer, AutoModelForCausalLM
-    import transformers.activations
-
-    _base = os.path.join(os.path.dirname(__file__), '..', 'transformers', 'src')
-    sys.path.insert(0, _base)
-    import transformers.models
-    import transformers.models.llama
-
-    def _load_performer_module():
-        path = os.path.join(_base, 'transformers', 'models', 'llama', 'modeling_llama_performer.py')
-        spec = importlib.util.spec_from_file_location(
-            'transformers.models.llama.modeling_llama_performer', path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = mod
-        spec.loader.exec_module(mod)
-        return mod
-
-    _perf_mod = _load_performer_module()
-    PerformerLlamaForCausalLM = _perf_mod.LlamaForCausalLM
+    sys.path = _saved_path
 
     print("Loading standard model...")
-    std_model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=DTYPE, device_map="cpu")
+    std_model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=DTYPE, device_map="cpu")
     std_model.eval()
 
     SECTION_A_PERFORMER_HEADS = 4
+    num_heads = std_model.config.num_attention_heads
 
     print("Loading performer model...")
-    perf_model = PerformerLlamaForCausalLM.from_pretrained(MODEL, dtype=DTYPE, device_map="cpu")
+    perf_model = AutoModelForCausalLM.from_pretrained(MODEL, torch_dtype=DTYPE, device_map="cpu")
     perf_model.eval()
+
+    # Monkey-patch attention layers with mixed performer attention
+    for layer in perf_model.model.layers:
+        layer.self_attn = MixedPerformerAttention(
+            layer.self_attn, num_performer_heads=SECTION_A_PERFORMER_HEADS
+        )
 
     tokenizer  = AutoTokenizer.from_pretrained(MODEL)
     prompt_ids = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
-    num_heads  = std_model.config.num_attention_heads
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION A — Per-token generation comparison
 # ═══════════════════════════════════════════════════════════════════════════
 if RUN_A:
-    for layer in perf_model.model.layers:
-        layer.self_attn.num_performer_heads = SECTION_A_PERFORMER_HEADS
-        layer.self_attn.num_standard_heads  = num_heads - SECTION_A_PERFORMER_HEADS
-
     print(f"\n{'═'*70}")
     print(f"SECTION A — Generation  [{SECTION_A_PERFORMER_HEADS}/{num_heads} performer heads]")
     print(f"{'═'*70}\n")
@@ -117,9 +208,6 @@ if RUN_A:
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION B — Speed benchmarks (kernel-level, no model load needed)
 # ═══════════════════════════════════════════════════════════════════════════
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'performer'))
-from performer_attention import PerformerAttentionCore, _HAS_TRITON
-
 try:
     from triton_scan import triton_scan_forward as _triton_scan_raw
     from triton_scan import triton_decode_forward as _triton_decode_raw
