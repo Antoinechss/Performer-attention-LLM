@@ -18,7 +18,7 @@ except Exception:
 
 
 def _sample_orf(head_dim, num_features, device=None):
-    """Sample orthogonal random features with chi(d) norm scaling (FAVOR+)."""
+    """Sample orthogonal random features (FAVOR+)."""
     if device is None:
         device = torch.device("cpu")
     blocks = []
@@ -31,7 +31,7 @@ def _sample_orf(head_dim, num_features, device=None):
 
 
 def _phi(x, omega, num_features, is_query=True):
-    """FAVOR+ feature map with max-subtraction for numerical stability."""
+    """FAVOR+ feature map"""
     omega = omega.to(device=x.device, dtype=x.dtype)
     proj_x = torch.einsum("bhnd,md->bhnm", x, omega)
     norm_x = 0.5 * (x ** 2).sum(dim=-1, keepdim=True)
@@ -101,7 +101,7 @@ class PerformerAttention(nn.Module):
 
 
 class PerformerAttentionCore(nn.Module):
-    """Core FAVOR+ attention — no projections, plugs into any architecture."""
+    """Core FAVOR+ attention"""
 
     def __init__(self, head_dim, num_features):
         super().__init__()
@@ -120,7 +120,7 @@ class PerformerAttentionCore(nn.Module):
         if q.shape[2] == k.shape[2]:
             # Prefill: causal scan
             pq, pk, vf = phi_q.float(), phi_k.float(), v.float()
-            if _HAS_TRITON and q.device.type == "cuda" and not self.training:
+            if _HAS_TRITON and q.device.type == "cuda" and not torch.is_grad_enabled():
                 out = _triton_scan(pq, pk, vf)
             else:
                 out = _python_scan(pq, pk, vf)
