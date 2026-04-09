@@ -18,7 +18,7 @@ except Exception:
 
 
 def _sample_orf(head_dim, num_features, device=None):
-    """Sample orthogonal random features (FAVOR+)."""
+    """Sample orthogonal random features with chi(d) norm scaling (FAVOR+)."""
     if device is None:
         device = torch.device("cpu")
     blocks = []
@@ -33,9 +33,8 @@ def _sample_orf(head_dim, num_features, device=None):
 def _phi(x, omega, num_features, is_query=True):
     """FAVOR+ feature map (matches Google's softmax_kernel_transformation).
 
-    Key detail from the Google reference: the max for numerical stability
-    is taken on proj_x (= x @ omega) ALONE, not on proj_x - norm_x.
-    Then exp(proj_x - norm_x - max(proj_x)) is computed.
+    The max for numerical stability is taken on proj_x (= x @ omega)
+    ALONE, not on proj_x - norm_x. This matches the Google reference.
 
     For queries:  max of proj_x over M dimension (per token, per head)
     For keys:     max of proj_x over M and N dimensions (per head)
@@ -111,7 +110,7 @@ class PerformerAttention(nn.Module):
 
 
 class PerformerAttentionCore(nn.Module):
-    """Core FAVOR+ attention"""
+    """Core FAVOR+ attention — no projections, plugs into any architecture."""
 
     def __init__(self, head_dim, num_features):
         super().__init__()
