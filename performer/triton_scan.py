@@ -95,19 +95,19 @@ if _TRITON_AVAILABLE:
         q_n    = tl.load(q_ptr + base_q + d_idx).to(tl.float32)
         norm_x = 0.5 * tl.sum(q_n * q_n)
 
-        # Pass 1: find max for stability
-        max_log_phi = -1e30
+        # Pass 1: find max of proj_x (without norm) for stability
+        max_proj = -1e30
         for m in range(M):
             omega_m = tl.load(omega_ptr + m * stride_om_m + d_idx).to(tl.float32)
-            log_phi_m = tl.sum(q_n * omega_m) - norm_x
-            max_log_phi = tl.where(log_phi_m > max_log_phi, log_phi_m, max_log_phi)
+            proj_m = tl.sum(q_n * omega_m)
+            max_proj = tl.where(proj_m > max_proj, proj_m, max_proj)
 
         # Pass 2: accumulate phi(q) @ kv_state and phi(q) @ k_state
         out   = tl.zeros([BLOCK_D], dtype=tl.float32)
         denom = 0.0
         for m in range(M):
             omega_m = tl.load(omega_ptr + m * stride_om_m + d_idx).to(tl.float32)
-            phi_m = inv_sqrt_M * (tl.exp(tl.sum(q_n * omega_m) - norm_x - max_log_phi) + 1e-6)
+            phi_m = inv_sqrt_M * (tl.exp(tl.sum(q_n * omega_m) - norm_x - max_proj) + 1e-6)
 
             kv_m = tl.load(kv_ptr + base_kv + m * stride_kv_m + d_idx).to(tl.float32)
             out  = out + phi_m * kv_m
