@@ -107,7 +107,7 @@ if _TRITON_AVAILABLE:
         denom = 0.0
         for m in range(M):
             omega_m = tl.load(omega_ptr + m * stride_om_m + d_idx).to(tl.float32)
-            phi_m = tl.exp(tl.sum(q_n * omega_m) - norm_x - max_log_phi) * inv_sqrt_M + 1e-4
+            phi_m = inv_sqrt_M * (tl.exp(tl.sum(q_n * omega_m) - norm_x - max_log_phi) + 1e-6)
 
             kv_m = tl.load(kv_ptr + base_kv + m * stride_kv_m + d_idx).to(tl.float32)
             out  = out + phi_m * kv_m

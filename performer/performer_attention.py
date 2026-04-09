@@ -31,16 +31,24 @@ def _sample_orf(head_dim, num_features, device=None):
 
 
 def _phi(x, omega, num_features, is_query=True):
-    """FAVOR+ feature map"""
+    """FAVOR+ feature map (matches Google's softmax_kernel_transformation).
+
+    For queries:  max-subtract over M dimension (per token, per head)
+    For keys:     max-subtract over M and N dimensions (per head)
+    This ensures phi(q)^T phi(k) correctly approximates exp(q^T k / sqrt(D)).
+    """
     omega = omega.to(device=x.device, dtype=x.dtype)
-    proj_x = torch.einsum("bhnd,md->bhnm", x, omega)
-    norm_x = 0.5 * (x ** 2).sum(dim=-1, keepdim=True)
-    log_phi = proj_x - norm_x
+    ratio = 1.0 / math.sqrt(num_features)
+    proj_x = torch.einsum("bhnd,md->bhnm", x, omega)      # [B, H, N, M]
+    norm_x = 0.5 * (x ** 2).sum(dim=-1, keepdim=True)      # [B, H, N, 1]
+    log_phi = proj_x - norm_x                                # [B, H, N, M]
     if is_query:
+        # Max over M dimension (last dim), per token — shape [B, H, N, 1]
         log_phi = log_phi - log_phi.max(dim=-1, keepdim=True).values
     else:
-        log_phi = log_phi - log_phi.max()
-    return torch.exp(log_phi) / math.sqrt(num_features) + 1e-4
+        # Max over M and N dimensions, per (batch, head) — shape [B, H, 1, 1]
+        log_phi = log_phi - log_phi.amax(dim=(-2, -1), keepdim=True)
+    return ratio * (torch.exp(log_phi) + 1e-6)
 
 
 def _python_scan(phi_q, phi_k, v):
