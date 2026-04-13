@@ -88,14 +88,24 @@ class MixedPerformerAttention(torch.nn.Module):
             k = k.repeat_interleave(self.num_key_value_groups, dim=1)
             v = v.repeat_interleave(self.num_key_value_groups, dim=1)
 
+        # Build causal mask when HF doesn't provide one.
+        # The original LlamaSdpaAttention uses is_causal=True inside SDPA,
+        # but our manual attention path needs an explicit mask.
+        if attention_mask is None and N > 1 and self.num_standard_heads > 0:
+            key_len = k.shape[2]
+            causal = torch.full((N, key_len), torch.finfo(q.dtype).min,
+                                device=q.device, dtype=q.dtype)
+            attention_mask = torch.triu(causal, diagonal=key_len - N + 1)[None, None]
+
         if self.num_standard_heads == 0:
             # All performer
             attn_out = self.performer_core(q, k, v)
         elif self.num_performer_heads == 0:
             # All standard
-            w = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) * self.scaling, dim=-1)
+            scores = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
             if attention_mask is not None:
-                w = w + attention_mask
+                scores = scores + attention_mask
+            w = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
             attn_out = torch.matmul(w, v)
         else:
             # Mixed: first K heads → FAVOR+, rest → softmax
