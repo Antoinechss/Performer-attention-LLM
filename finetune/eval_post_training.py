@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-_REPO_ROOT     = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PERFORMER_DIR = os.path.join(_REPO_ROOT, "performer")
 if _PERFORMER_DIR not in sys.path:
     sys.path.insert(0, _PERFORMER_DIR)

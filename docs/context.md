@@ -1,83 +1,163 @@
 # Project Context
 
-M2 research project (CERMICS / Advansight). Goal: reduce LLM attention computation from O(N²) to O(N) by replacing a fraction of softmax attention heads in TinyLlama 1.1B with FAVOR+ (Performer) linear attention, then recovering output quality via knowledge distillation fine-tuning.
+M2 research project (CERMICS / Advansight). Goal: reduce LLM attention computation from
+O(N²) to O(N) by replacing a fraction of softmax attention heads in TinyLlama 1.1B with
+FAVOR+ (Performer) linear attention, then recovering output quality via knowledge distillation.
+
+---
+
+## The Triangle
+
+The project is organised around three independent axes of comparison between softmax and
+FAVOR+ attention, which together form a complete evaluation:
+
+```
+                        QUALITY
+                       (generation)
+                           ▲
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                      /         \
+          SPEED ◄────────────────► APPROXIMATION
+       (prefill/decode)            (kernel convergence
+        latency, FLOPs)             eigenvalues, M/D ratio)
+```
+
+Each vertex is a separate concern with its own code and outputs:
+
+- **Quality** — does the model still generate coherent text? How does perplexity and
+  token-level KL divergence degrade as performer heads increase? Does fine-tuning recover it?
+- **Speed** — what is the actual latency gain at various sequence lengths? Where does the
+  O(N·M) performer beat O(N²) softmax in practice?
+- **Approximation** — how well does FAVOR+ approximate the softmax kernel mathematically?
+  Eigenvalue spectrum comparison, convergence as M/D ratio increases, variance across omega draws.
 
 ---
 
 ## Repository Structure
 
 ```
-performer/
-  performer_attention.py   # Core FAVOR+ implementation: PerformerAttentionCore, PerformerAttention
-  triton_scan.py           # Triton CUDA kernels for prefill scan and decode step
-models/
-  analysis.py              # Standalone analysis script (Sections A/B/C, no notebooks needed)
-  performer_attention.py   # (same source used via sys.path in notebooks)
-analysis.ipynb             # Main analysis notebook (Colab): quality + speed benchmarks
-finetune.ipynb             # Knowledge distillation training notebook (Colab)
-Notebook - spectre approximations (2).ipynb  # Kernel spectrum theory notebook
+performer/                        # Shared kernel implementation (imported by everything)
+  performer_attention.py          # PerformerAttentionCore, _phi, _sample_orf, _python_scan,
+                                  # _python_scan_checkpointed (training path, additive)
+  triton_scan.py                  # Triton CUDA kernels (prefill scan + decode step)
+
+analysis/                         # The three triangle vertices
+  analysis.ipynb                  # Main notebook (Colab): all three sections in one place
+  analysis.py                     # Standalone script version (no Colab needed)
+  quality/                        # Vertex 1 — generation quality
+  speed/                          # Vertex 2 — prefill/decode benchmarks
+  approximation/                  # Vertex 3 — kernel convergence, eigenvalues
+    Notebook - spectre approximations (2).ipynb
+
+finetune/                         # Fine-tuning pipeline (run on RunPod, not locally)
+  finetune.py                     # Main training script
+  eval_post_training.py           # Perplexity, lm-eval, speed, spectral analysis post-FT
+  requirements_finetune.txt       # pip dependencies
+
 docs/
-  context.md               # This file
-  theory/                  # PDF paper summaries (see below)
+  context.md                      # This file
+  finetune_plan.md                # Fine-tuning decisions, phase table, rationale
+  finetune_runpod_setup.md        # RunPod step-by-step setup guide
+  theory/                         # PDF summaries
+    performers.md
+    kernel_approximation.md
+    integral_operator.md
 ```
 
 ---
 
 ## What Is Done
 
-### Core implementation
-- `PerformerAttentionCore` (`performer/performer_attention.py`): standalone FAVOR+ attention module, no Q/K/V projections, plugs into any architecture. Takes pre-projected Q, K, V tensors.
+### Core (`performer/`)
+
+- `PerformerAttentionCore`: standalone FAVOR+ attention, no projections, plugs into any
+  architecture. Takes pre-projected Q, K, V tensors [B, H, N, D].
 - `PerformerAttention`: full module with projections, for isolated testing.
-- `_sample_orf`: orthogonal random feature sampling (FAVOR+ spec, chi(d) norm scaling).
-- `_phi`: FAVOR+ positive feature map with numerical stability (per-query max stabilizer for queries, global max for keys).
-- `_python_scan`: causal sequential scan fallback (CPU/MPS, supports autograd for training).
-- `triton_scan.py`: Triton CUDA kernels for (1) prefill causal scan and (2) fused decode step. Auto-detected and used when CUDA + Triton available.
-- `MixedPerformerAttention` (in both notebooks and `models/analysis.py`): wraps HuggingFace `LlamaAttention`, routes the first `num_performer_heads` heads through FAVOR+ and the rest through standard scaled dot-product attention. Handles GQA (TinyLlama uses 4 KV heads / 32 query heads), RoPE application, KV-cache compatibility.
+- `_sample_orf`: orthogonal random feature sampling (chi(d) norm scaling, FAVOR+ spec).
+- `_phi`: positive feature map with per-query / global-key numerical stabilizer.
+- `_python_scan`: causal sequential scan, O(M×D) memory, CPU/MPS/CUDA fallback.
+- `_python_scan_checkpointed`: wraps `_python_scan` with `torch.utils.checkpoint`.
+  Auto-selected inside `PerformerAttentionCore.forward` when `torch.is_grad_enabled()`.
+  Reduces scan activation memory from O(N×M×D) to O(M×D). Inference paths unchanged.
+- `triton_scan.py`: Triton CUDA kernels — used only when CUDA + Triton available and
+  grad is disabled (inference only).
+- `MixedPerformerAttention` (defined in `analysis.py`, `finetune.py`, `eval_post_training.py`
+  — kept local to each to avoid shared state): wraps HF `LlamaAttention`, routes first K
+  heads through FAVOR+ and remaining through softmax. Handles GQA, RoPE, KV-cache.
 
-### Analysis notebook (`analysis.ipynb`, Colab)
-- Section 0: setup, correctness checkpoint (0/32 performer heads must equal standard model exactly).
-- Section 1.1: layerwise replacement — first n layers fully replaced; shows error accumulates rapidly across layers.
-- Section 1.2: per-token generation comparison (4/32 heads replaced), token-level KL divergence and probability tracking.
-- Section 2: prefill scaling benchmarks (O(N²) softmax vs O(N·M) performer) and decode step benchmarks. Sequence lengths 256–4096.
-- Section C: KL divergence and top-5 overlap sweep across 0–32 performer heads.
+### Analysis (`analysis/`)
 
-### Fine-tuning notebook (`finetune.ipynb`, Colab)
-- Knowledge distillation: frozen teacher (softmax TinyLlama) guides student (performer-patched TinyLlama).
-- Loss: `alpha * CE_loss + (1-alpha) * KL_distillation_loss`.
-- Dataset: WikiText-103, fixed-length pre-tokenized chunks.
-- 4-phase curriculum: 4 heads → 8 heads → 16 heads → 32 heads, progressively unfreezing Q/K then Q/K/V/O.
-- Checkpoint save/resume support for Colab disconnects. Optional Google Drive export.
+`analysis.ipynb` / `analysis.py` cover all three triangle vertices in a single run:
 
-### Kernel spectrum notebook (`Notebook - spectre approximations (2).ipynb`)
-- Numerical study of the eigenvalue spectrum of the softmax kernel and its three approximations (trigonometric, positive PRF, hyperbolic PRF).
-- Studies effect of normalization conventions (1/√d, 1/d^0.25) on spectrum alignment between approximations and exact kernel.
-- Variance analysis across multiple omega draws.
+- **Quality** (Section 1): correctness checkpoint (0/32 heads = standard model), layerwise
+  degradation sweep, per-token KL divergence and generation comparison at 4/32 heads.
+- **Speed** (Section 2): prefill O(N²) vs O(N·M) scaling at N=256–4096, decode step
+  benchmark, speed equivalence threshold (where N·M ≈ N²).
+- **Approximation** (Section 3): FAVOR+ convergence as M/D ratio increases, attention weight
+  pattern similarity vs softmax.
+
+`analysis/approximation/Notebook - spectre approximations (2).ipynb`: eigenvalue spectrum of
+the softmax kernel and three approximations (trigonometric, positive PRF, hyperbolic PRF)
+on synthetic data. Variance analysis across omega draws. Will be extended to load real
+activation data from `spectral_data.json` (output of `eval_post_training.py`).
+
+### Fine-tuning (`finetune/`)
+
+`finetune.py` — production script for RunPod A100 PCIe 40GB (~$15 total, ~10–12h):
+- Knowledge distillation: frozen softmax teacher → performer student.
+- Loss: `0.5 * CE + 0.5 * T² * KL`, T=2.0.
+- Train: WikiText-103, 50k chunks. Eval: WT103 val + C4 val (two domains).
+- 4-phase curriculum (4→8→16→32 heads), single AdamW carried across phases (momentum
+  preserved), GradScaler, 8-bit AdamW via bitsandbytes.
+- One `best_{phase}.pt` checkpoint per phase. Resume: `--resume <path> --start_phase N`.
+
+`eval_post_training.py` — run after all 4 phases:
+- Perplexity before/after FT for each checkpoint on WT103 and C4.
+- Speed benchmark: prefill latency vs softmax at N=256–4096 → `speed_results.json`.
+- Spectral analysis: kernel eigenvalues from real TinyLlama activations → `spectral_data.json`
+  (feeds directly into the spectrum notebook).
+- lm-eval-harness: HellaSwag, ARC-Easy, WinoGrande for teacher and Phase 4 checkpoint.
+
+See `docs/finetune_plan.md` for all decisions and `docs/finetune_runpod_setup.md` for setup.
 
 ---
 
 ## Key Design Decisions
 
-- `num_features=256` random features per head (M). Trade-off between approximation quality and speed.
-- First K heads (indices 0..K-1) are replaced with performer; remaining heads stay softmax. This is a configurable parameter, not a learned selection.
-- During prefill (N > 1 tokens), causal scan is used (sequential O(N·M·D) ops). During decode (single new token), accumulated KV state allows O(M·D) step.
-- `omega` buffer is registered as `persistent=True` to survive model save/load.
-- Triton kernels are disabled during training (Python scan supports autograd; Triton scan does not).
-- Causal mask is built manually in `MixedPerformerAttention` because SDPA's `is_causal=True` is bypassed in the mixed path.
+- `num_features=256` random features per head (M). Trade-off: quality vs speed.
+- First K heads (indices 0..K-1) replaced with performer; rest stay softmax. Not learned.
+- Prefill (N>1): causal scan O(N·M·D). Decode (N=1): O(M·D) state lookup.
+- `omega` buffer: `persistent=True`, survives save/load.
+- Triton disabled during training (autograd incompatible); checkpointed Python scan used instead.
+- Causal mask built manually in `MixedPerformerAttention` — SDPA `is_causal=True` bypassed
+  in the mixed path.
 
 ---
 
 ## Next Steps
 
-1. **Fine-tuning execution**: run the 4-phase distillation in `finetune.ipynb` on Colab (GPU required). Target: recover perplexity close to baseline after full (32/32) head replacement.
+1. **Run fine-tuning**: `cd finetune && python finetune.py` on RunPod. Follow
+   `docs/finetune_runpod_setup.md`. Download `eval_results.json`, `spectral_data.json`,
+   `speed_results.json` when done.
 
-2. **Theory-code link**: compare empirical eigenvalue spectra of the attention kernel matrix (from the codebase) against the theoretical spectral decay predicted by the integral operator analysis. The `Notebook - spectre approximations (2).ipynb` sets up the numerical tools; the next step is to run this comparison on actual TinyLlama Q/K activations.
+2. **Run post-training eval**: `python eval_post_training.py --ckpt_dir /workspace/checkpoints`.
+   Full comparison table: perplexity before/after FT per phase (WT103 + C4), downstream tasks,
+   speed.
 
-3. **Industry cost analysis**: model and compare inference costs (FLOPs, memory bandwidth, latency) for softmax vs. linear attention at production scale (long contexts, large batch sizes). Use benchmark data from Section B of `analysis.ipynb` as input.
+3. **Theory-code spectral link**: load `spectral_data.json` in the spectrum notebook and
+   overlay real activation eigenvalues against the theoretical spectral decay from
+   `docs/theory/integral_operator.md`.
 
-4. **Potential implementation extensions** (theory-driven, see paper summaries in `docs/theory/`):
-   - Hyperbolic feature map (`phi_hyp`) as a lower-variance alternative to the current `phi_pos` used in FAVOR+.
-   - Orthogonal random features with block-diagonal Hadamard structure (Fastfood / SORF) for O(d log d) omega sampling instead of O(d²).
-   - Extend kernel approximation beyond softmax (e.g., Gaussian kernel attention variants).
+4. **Industry cost analysis**: use `speed_results.json` to model cost-per-token at production
+   scale (long contexts, large batches) for softmax vs. each K variant.
+
+5. **Potential extensions** (theory-driven):
+   - Hyperbolic feature map (`phi_hyp`) — lower variance than current `phi_pos`.
+   - Fastfood/SORF structured omega sampling — O(d log d) instead of O(d²).
+   - Extend beyond softmax to Gaussian kernel attention variants.
 
 ---
 

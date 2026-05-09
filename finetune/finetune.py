@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 # Add performer/ to sys.path. Never add the repo root (shadows HF transformers/).
-_REPO_ROOT     = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PERFORMER_DIR = os.path.join(_REPO_ROOT, "performer")
 if _PERFORMER_DIR not in sys.path:
     sys.path.insert(0, _PERFORMER_DIR)
@@ -317,6 +317,23 @@ def build_dataloaders(tokenizer):
 # ── Training ──────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
+def _teacher_ppl(teacher, loader):
+    """Perplexity of the frozen teacher model. Does not touch train/eval mode."""
+    total_ce, n_tokens = 0.0, 0
+    for batch in loader:
+        input_ids = batch["input_ids"].to(DEVICE)
+        labels    = batch["labels"].to(DEVICE)
+        with torch.amp.autocast("cuda", dtype=DTYPE):
+            out = teacher(input_ids=input_ids, use_cache=False)
+        logits = out.logits[:, :-1].float()
+        tgt    = labels[:, 1:].contiguous()
+        ce     = F.cross_entropy(logits.reshape(-1, logits.size(-1)), tgt.reshape(-1), reduction="sum")
+        total_ce += ce.item()
+        n_tokens += tgt.numel()
+    return math.exp(min(total_ce / n_tokens, 20))
+
+
+@torch.no_grad()
 def evaluate(student, teacher, loader, label):
     student.eval()
     total_ce, total_kl, n_tokens = 0.0, 0.0, 0
@@ -393,15 +410,15 @@ def run_phase(phase_idx, student, teacher,
     log_interval = 50
     t0 = time.time()
 
-    for epoch in range(num_epochs):
+    # Steps per epoch (full passes over the loader)
+    steps_per_epoch = len(train_loader) // GRAD_ACCUM
+    # Skip epochs already completed when resuming mid-phase
+    start_epoch = resume_step // steps_per_epoch if steps_per_epoch > 0 else 0
+
+    for epoch in range(start_epoch, num_epochs):
         epoch_loss = epoch_ce = epoch_kl = 0.0
 
         for batch_idx, batch in enumerate(train_loader):
-            # Skip already-trained steps when resuming
-            if global_step < resume_step and (batch_idx + 1) % GRAD_ACCUM == 0:
-                global_step += 1
-                continue
-
             input_ids = batch["input_ids"].to(DEVICE, non_blocking=True)
             labels    = batch["labels"].to(DEVICE, non_blocking=True)
 
@@ -545,18 +562,26 @@ def main():
     ppl_c4_base, _ = evaluate(student, teacher, val_c4_loader, "C4")
     print(f"Baseline (4 heads, no training): WT103 ppl={ppl_wt_base:.2f} | C4 ppl={ppl_c4_base:.2f}")
 
-    # Teacher baseline
-    teacher_ppl_wt, _ = evaluate(teacher, teacher, val_wt_loader, "WT103")
-    teacher_ppl_c4, _ = evaluate(teacher, teacher, val_c4_loader, "C4")
+    # Teacher baseline — compute directly, don't use evaluate() which calls .train() on its first arg
+    teacher_ppl_wt = _teacher_ppl(teacher, val_wt_loader)
+    teacher_ppl_c4 = _teacher_ppl(teacher, val_c4_loader)
     print(f"Teacher  (softmax baseline):     WT103 ppl={teacher_ppl_wt:.2f} | C4 ppl={teacher_ppl_c4:.2f}")
 
-    # Resume handling
+    # Resume handling — scheduler is built inside run_phase, so we only restore
+    # model + optimizer + scaler state here. Scheduler state is intentionally
+    # not restored: run_phase fast-forwards it cleanly from global_step.
     resume_step = 0
     if args.resume:
-        resume_step, _ = load_checkpoint(student, optimizer, scaler,
-                                         # scheduler not yet built; pass a dummy
-                                         get_cosine_schedule_with_warmup(optimizer, 10, 100),
-                                         args.resume)
+        ckpt = torch.load(args.resume, map_location=DEVICE, weights_only=False)
+        for i, layer in enumerate(student.model.layers):
+            key = f"layer_{i}"
+            if key in ckpt["omegas"] and hasattr(layer.self_attn, "performer_core"):
+                layer.self_attn.performer_core.omega.copy_(ckpt["omegas"][key].to(DEVICE))
+        student.load_state_dict(ckpt["model_state_dict"], strict=False)
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scaler.load_state_dict(ckpt["scaler_state_dict"])
+        resume_step = ckpt["step"]
+        print(f"  [resume] loaded phase={ckpt['phase']}, step={resume_step}")
 
     # Training loop across phases
     results = {

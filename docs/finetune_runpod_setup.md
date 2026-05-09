@@ -5,7 +5,7 @@
 - No preemption, dedicated hardware
 - Persistent network volumes (data survives pod stop/start)
 - Full terminal access, run `.py` scripts directly
-- A100 PCIe 40GB at ~$1.19–1.39/hr: ~$12–15 for the full 10–12h run
+- A100 PCIe 80GB at ~$1.39/hr: ~$14–17 for the full 10–12h run
 - Total budget stays under $20 including storage
 
 ---
@@ -25,7 +25,7 @@ Cost: 20 GB × $0.07/GB/month = ~$1.40/month (negligible)
 ## Step 2 — Launch the pod
 
 1. Go to Pods → New Pod
-2. Select GPU: **A100 PCIe 40GB** (Secure Cloud tab — NOT Community Cloud)
+2. Select GPU: **A100 PCIe 80GB** (Secure Cloud tab — NOT Community Cloud)
 3. Template: **RunPod PyTorch 2.1** (has CUDA 12.1, Python 3.10, torch pre-installed)
 4. Container disk: 20 GB (for HuggingFace model cache)
 5. Volume: attach the `performer-checkpoints` volume at `/workspace`
@@ -45,7 +45,7 @@ git clone https://github.com/Antoinechss/Performer-attention-LLM.git
 cd Performer-attention-LLM
 
 # Install dependencies
-pip install -r requirements_finetune.txt
+pip install -r finetune/requirements_finetune.txt
 
 # Verify GPU
 python -c "import torch; print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_properties(0).total_memory / 1e9, 'GB')"
@@ -61,9 +61,28 @@ python -c "import triton; print('triton ok')"
 
 ## Step 4 — Run training
 
+Always run inside `tmux` so the process survives SSH disconnects (hotspot drops,
+closing your laptop, etc.). The training runs on RunPod's server — your connection
+only needs to be alive to see the output, not to keep the job running.
+
 ```bash
 cd /workspace/Performer-attention-LLM
-python finetune.py
+
+# Start a tmux session
+tmux new -s train
+
+# Run training
+python finetune/finetune.py
+
+# Detach at any time with Ctrl+B then D — training keeps running
+# Reattach later (from any connection) with:
+#   tmux attach -t train
+```
+
+If you prefer a log file over live output:
+```bash
+nohup python finetune/finetune.py > /workspace/train.log 2>&1 &
+tail -f /workspace/train.log
 ```
 
 Checkpoints are auto-saved to `/workspace/checkpoints/` (the network volume).
@@ -84,7 +103,7 @@ is at `/workspace/checkpoints/{phase_name}_step{N}.pt`.
 
 Resume from a specific phase and step:
 ```bash
-python finetune.py --resume /workspace/checkpoints/phase2_K8_QKVO_step1000.pt --start_phase 1
+python finetune/finetune.py --resume /workspace/checkpoints/phase2_K8_QKVO_step1000.pt --start_phase 1
 ```
 
 `--start_phase` is 0-indexed (0=phase1, 1=phase2, 2=phase3, 3=phase4).
@@ -95,7 +114,7 @@ python finetune.py --resume /workspace/checkpoints/phase2_K8_QKVO_step1000.pt --
 
 After all phases complete:
 ```bash
-python eval_post_training.py --ckpt_dir /workspace/checkpoints
+python finetune/eval_post_training.py --ckpt_dir /workspace/checkpoints
 ```
 
 Outputs saved to `/workspace/checkpoints/`:
@@ -130,7 +149,7 @@ Network volume persists independently — checkpoints are safe.
 
 | Item | Hours | Rate | Cost |
 |------|-------|------|------|
-| A100 PCIe 40GB (Secure Cloud) | 11h | ~$1.30/hr | ~$14.30 |
+| A100 PCIe 80GB (Secure Cloud) | 11h | ~$1.39/hr | ~$15.30 |
 | Network volume (20 GB) | 1 month | $0.07/GB/mo | ~$1.40 |
 | Container disk | included | — | $0 |
 | **Total** | | | **~$15.70** |
