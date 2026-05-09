@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint as _grad_checkpoint
 import math
 import importlib.util as _ilu
 import os as _os
@@ -68,6 +69,17 @@ def _python_scan(phi_q, phi_k, v):
     return out
 
 
+def _python_scan_checkpointed(phi_q, phi_k, v):
+    """Memory-efficient causal scan for training via gradient checkpointing.
+
+    Wraps _python_scan with torch.utils.checkpoint so PyTorch recomputes the
+    forward pass during backward instead of storing N intermediate S matrices.
+    Memory: O(M*D) instead of O(N*M*D). Cost: ~2x scan compute (negligible).
+    Only called when torch.is_grad_enabled() — never affects inference paths.
+    """
+    return _grad_checkpoint(_python_scan, phi_q, phi_k, v, use_reentrant=False)
+
+
 class PerformerAttention(nn.Module):
     """Standalone Performer attention with Q/K/V projections (for testing)."""
 
@@ -131,6 +143,9 @@ class PerformerAttentionCore(nn.Module):
             pq, pk, vf = phi_q.float(), phi_k.float(), v.float()
             if _HAS_TRITON and q.device.type == "cuda" and not torch.is_grad_enabled():
                 out = _triton_scan(pq, pk, vf)
+            elif torch.is_grad_enabled():
+                # Training: recompute scan during backward to avoid O(N*M*D) activation storage
+                out = _python_scan_checkpointed(pq, pk, vf)
             else:
                 out = _python_scan(pq, pk, vf)
             out = out.to(q.dtype)
