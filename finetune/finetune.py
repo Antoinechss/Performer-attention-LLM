@@ -29,14 +29,9 @@ from performer_attention import PerformerAttentionCore, _HAS_TRITON
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup
 from datasets import load_dataset
 
-# ── Optional: 8-bit AdamW ─────────────────────────────────────────────────────
-try:
-    import bitsandbytes as bnb
-    _HAS_BNB = True
-except ImportError:
-    _HAS_BNB = False
-    print("WARNING: bitsandbytes not installed. Using fp32 AdamW (higher VRAM).")
-    print("         Install with: pip install bitsandbytes")
+# 8-bit AdamW is disabled: incompatible with fp16 GradScaler on this torch version.
+# A100 80GB has sufficient VRAM for fp32 AdamW.
+_HAS_BNB = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_ID   = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
