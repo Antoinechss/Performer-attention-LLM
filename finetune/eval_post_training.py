@@ -101,7 +101,7 @@ class MixedPerformerAttention(torch.nn.Module):
             out_s = torch.matmul(w, v_s)
             attn_out = torch.cat([out_p, out_s], dim=1)
         attn_out = attn_out.transpose(1, 2).contiguous().reshape(B, N, -1)
-        return self.o_proj(attn_out), None
+        return self.o_proj(attn_out), None, None
 
 
 def patch_model(model, num_performer_heads):
