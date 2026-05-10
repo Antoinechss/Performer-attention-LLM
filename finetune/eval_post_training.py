@@ -292,14 +292,18 @@ def extract_kernel_eigenvalues(model_std, model_perf, tokenizer, n_heads_perf, n
                 hidden_std  = [None]
                 hidden_perf = [None]
 
-                def hook_std(module, inp, out):
-                    hidden_std[0] = inp[0].detach()
+                def hook_std(module, inp, kwargs_h, out):
+                    hs = kwargs_h.get("hidden_states") or (inp[0] if inp else None)
+                    if hs is not None:
+                        hidden_std[0] = hs.detach()
 
-                def hook_perf(module, inp, out):
-                    hidden_perf[0] = inp[0].detach()
+                def hook_perf(module, inp, kwargs_h, out):
+                    hs = kwargs_h.get("hidden_states") or (inp[0] if inp else None)
+                    if hs is not None:
+                        hidden_perf[0] = hs.detach()
 
-                h_std  = layer_std.self_attn.register_forward_hook(hook_std)
-                h_perf = layer_perf.self_attn.register_forward_hook(hook_perf)
+                h_std  = layer_std.self_attn.register_forward_hook(hook_std,  with_kwargs=True)
+                h_perf = layer_perf.self_attn.register_forward_hook(hook_perf, with_kwargs=True)
 
                 with torch.amp.autocast("cuda", dtype=DTYPE):
                     model_std(input_ids=ids, use_cache=False)
@@ -397,7 +401,7 @@ def run_lm_eval(ckpt_path, output_dir, tasks="hellaswag,arc_easy,winogrande"):
 
     # Load the checkpoint into a model and wrap for lm-eval
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    base = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+    base = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
     model_eval, n_heads, phase_name = load_performer_checkpoint(ckpt_path, base, tokenizer)
 
     lm = HFLM(pretrained=model_eval, tokenizer=tokenizer, batch_size=4)
@@ -437,7 +441,7 @@ def main():
 
     # ── 1. Teacher baseline ───────────────────────────────────────────────────
     print("\n[1/4] Teacher perplexity baseline...")
-    teacher = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+    teacher = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
     teacher.eval()
     ppl_wt = compute_ppl(teacher, val_wt_loader)
     ppl_c4 = compute_ppl(teacher, val_c4_loader)
@@ -458,11 +462,11 @@ def main():
             print(f"  Skipping {phase_name} (checkpoint not found)")
             continue
 
-        base = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+        base = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
         model, n_heads, _ = load_performer_checkpoint(ckpt_path, base, tokenizer)
 
         # Before fine-tuning: eval a fresh patched model (untrained)
-        base_raw = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+        base_raw = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
         model_raw = patch_model(base_raw, n_heads)
         model_raw.eval()
         ppl_wt_raw = compute_ppl(model_raw, val_wt_loader)
@@ -513,8 +517,8 @@ def main():
         # Use the Phase 4 checkpoint (32/32 heads) for spectral comparison
         ckpt_path = os.path.join(args.ckpt_dir, "best_phase4_K32_QKVO.pt")
         if os.path.exists(ckpt_path):
-            base_std  = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
-            base_perf = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+            base_std  = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
+            base_perf = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
             model_perf, n_heads_perf, _ = load_performer_checkpoint(ckpt_path, base_perf, tokenizer)
             base_std.eval()
             model_perf.eval()

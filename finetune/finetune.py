@@ -514,14 +514,14 @@ def main():
 
     # Load teacher (frozen)
     print("\nLoading teacher model...")
-    teacher = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+    teacher = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad = False
 
     # Load student and patch
     print("Loading student model...")
-    student = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
+    student = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=DTYPE, device_map=DEVICE)
     student = patch_model(student, num_performer_heads=PHASES[args.start_phase][0])
 
     # Freeze everything initially
