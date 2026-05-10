@@ -9,17 +9,14 @@ Two kernels:
 import math
 import torch
 
+_TRITON_AVAILABLE = False
+_favor_scan_kernel = None
+_favor_decode_kernel = None
+
 try:
     import triton
     import triton.language as tl
-    _TRITON_AVAILABLE = True
-except ImportError:
-    _TRITON_AVAILABLE = False
 
-
-# ── Prefill scan kernel ───────────────────────────────────────────────────────
-
-if _TRITON_AVAILABLE:
     @triton.jit
     def _favor_scan_kernel(
         phi_q_ptr, phi_k_ptr, v_ptr, out_ptr,
@@ -52,26 +49,6 @@ if _TRITON_AVAILABLE:
             denom = tl.sum(phi_q_n * z) + 1e-6
             tl.store(out_ptr + base_v + n * stride_v_n + d_idx, num / denom)
 
-
-def triton_scan_forward(phi_q, phi_k, v):
-    """Causal scan on pre-computed phi tensors. [B,H,N,M] + [B,H,N,D] → [B,H,N,D]"""
-    assert _TRITON_AVAILABLE and phi_q.device.type == "cuda"
-    phi_q, phi_k, v = phi_q.contiguous(), phi_k.contiguous(), v.contiguous()
-    B, H, N, M = phi_q.shape
-    D = v.shape[-1]
-    out = torch.empty(B, H, N, D, dtype=phi_q.dtype, device=phi_q.device)
-    _favor_scan_kernel[(B * H,)](
-        phi_q, phi_k, v, out, N,
-        phi_q.stride(0), phi_q.stride(1), phi_q.stride(2),
-        v.stride(0), v.stride(1), v.stride(2),
-        H=H, BLOCK_M=M, BLOCK_D=D,
-    )
-    return out
-
-
-# ── Fused decode kernel ───────────────────────────────────────────────────────
-
-if _TRITON_AVAILABLE:
     @triton.jit
     def _favor_decode_kernel(
         q_ptr, omega_ptr, kv_ptr, k_ptr, out_ptr,
@@ -116,6 +93,29 @@ if _TRITON_AVAILABLE:
             denom = denom + phi_m * k_m
 
         tl.store(out_ptr + base_out + d_idx, out / (denom + 1e-6))
+
+    _TRITON_AVAILABLE = True
+
+except Exception:
+    pass
+
+
+# ── Public entry points ───────────────────────────────────────────────────────
+
+def triton_scan_forward(phi_q, phi_k, v):
+    """Causal scan on pre-computed phi tensors. [B,H,N,M] + [B,H,N,D] → [B,H,N,D]"""
+    assert _TRITON_AVAILABLE and phi_q.device.type == "cuda"
+    phi_q, phi_k, v = phi_q.contiguous(), phi_k.contiguous(), v.contiguous()
+    B, H, N, M = phi_q.shape
+    D = v.shape[-1]
+    out = torch.empty(B, H, N, D, dtype=phi_q.dtype, device=phi_q.device)
+    _favor_scan_kernel[(B * H,)](
+        phi_q, phi_k, v, out, N,
+        phi_q.stride(0), phi_q.stride(1), phi_q.stride(2),
+        v.stride(0), v.stride(1), v.stride(2),
+        H=H, BLOCK_M=M, BLOCK_D=D,
+    )
+    return out
 
 
 def triton_decode_forward(q, omega, kv_state, k_state):
