@@ -47,7 +47,7 @@ TEMPERATURE = 2.0
 # Training
 MICRO_BATCH        = 1
 GRAD_ACCUM         = 8      # effective batch = 8
-SAVE_STEPS         = 500
+SAVE_STEPS         = 100
 EVAL_STEPS         = 250
 MAX_TRAIN_SAMPLES  = 50_000  # ~25M tokens; enough for phases 3-4
 MAX_VAL_SAMPLES    = 300
