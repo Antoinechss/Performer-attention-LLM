@@ -28,7 +28,7 @@ from datasets import load_dataset
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_ID    = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-DTYPE       = torch.float16
+DTYPE       = torch.bfloat16
 DEVICE      = "cuda"
 SEQ_LEN     = 512
 MAX_VAL_SAMPLES = 300
@@ -209,7 +209,7 @@ def run_speed_benchmark():
     HEAD_COUNTS  = [0, 4, 8, 16, 32]   # 0 = pure softmax
 
     results = {}
-    _dtype  = torch.float16
+    _dtype  = torch.bfloat16
 
     for N in SEQ_LEN_LIST:
         results[N] = {}

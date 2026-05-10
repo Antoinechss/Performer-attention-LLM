@@ -29,13 +29,12 @@ from performer_attention import PerformerAttentionCore, _HAS_TRITON
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup
 from datasets import load_dataset
 
-# 8-bit AdamW is disabled: incompatible with fp16 GradScaler on this torch version.
-# A100 80GB has sufficient VRAM for fp32 AdamW.
+# 8-bit AdamW disabled: A100/4090 has sufficient VRAM for fp32 AdamW.
 _HAS_BNB = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_ID   = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-DTYPE      = torch.float16
+DTYPE      = torch.bfloat16
 DEVICE     = "cuda"
 SEQ_LEN    = 512
 SEED       = 42
@@ -214,7 +213,7 @@ def get_trainable_params(model):
     return [p for p in model.parameters() if p.requires_grad]
 
 
-def save_checkpoint(model, optimizer, scaler, scheduler, step, phase_name, path):
+def save_checkpoint(model, optimizer, scheduler, step, phase_name, path):
     omegas = {
         f"layer_{i}": layer.self_attn.performer_core.omega.cpu()
         for i, layer in enumerate(model.model.layers)
@@ -223,7 +222,6 @@ def save_checkpoint(model, optimizer, scaler, scheduler, step, phase_name, path)
     torch.save({
         "model_state_dict":     model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "scaler_state_dict":    scaler.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "step":                 step,
         "phase":                phase_name,
@@ -232,7 +230,7 @@ def save_checkpoint(model, optimizer, scaler, scheduler, step, phase_name, path)
     print(f"  [ckpt] saved {os.path.basename(path)}")
 
 
-def load_checkpoint(model, optimizer, scaler, scheduler, path):
+def load_checkpoint(model, optimizer, path):
     ckpt = torch.load(path, map_location=DEVICE, weights_only=False)
     for i, layer in enumerate(model.model.layers):
         key = f"layer_{i}"
@@ -240,8 +238,6 @@ def load_checkpoint(model, optimizer, scaler, scheduler, path):
             layer.self_attn.performer_core.omega.copy_(ckpt["omegas"][key].to(DEVICE))
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    scaler.load_state_dict(ckpt["scaler_state_dict"])
-    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     print(f"  [ckpt] loaded phase={ckpt['phase']}, step={ckpt['step']}")
     return ckpt["step"], ckpt["phase"]
 
@@ -364,7 +360,7 @@ def evaluate(student, teacher, loader, label):
 
 def run_phase(phase_idx, student, teacher,
               train_loader, val_wt_loader, val_c4_loader,
-              optimizer, scaler,
+              optimizer,
               num_performer_heads, unfreeze_mode, lr, num_epochs,
               phase_name, resume_step=0):
 
@@ -435,17 +431,15 @@ def run_phase(phase_idx, student, teacher,
 
             loss = (ALPHA * ce_loss + (1 - ALPHA) * kl_loss) / GRAD_ACCUM
 
-            scaler.scale(loss).backward()
+            loss.backward()
 
             epoch_ce   += ce_loss.item()
             epoch_kl   += kl_loss.item()
             epoch_loss += loss.item() * GRAD_ACCUM
 
             if (batch_idx + 1) % GRAD_ACCUM == 0:
-                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
                 global_step += 1
@@ -457,7 +451,6 @@ def run_phase(phase_idx, student, teacher,
                           f"CE {epoch_ce/n:.4f} | "
                           f"KL {epoch_kl/n:.4f} | "
                           f"lr {scheduler.get_last_lr()[0]:.2e} | "
-                          f"scale {scaler.get_scale():.0f} | "
                           f"{time.time()-t0:.0f}s")
 
                 if global_step % EVAL_STEPS == 0:
@@ -468,13 +461,13 @@ def run_phase(phase_idx, student, teacher,
                           f"C4 ppl={ppl_c4:.2f} kl={kl_c4:.4f}")
                     if ppl_wt < best_ppl_wt:
                         best_ppl_wt = ppl_wt
-                        save_checkpoint(student, optimizer, scaler, scheduler,
+                        save_checkpoint(student, optimizer, scheduler,
                                         global_step, phase_name,
                                         os.path.join(CKPT_DIR, f"best_{phase_name}.pt"))
                     student.train()
 
                 if global_step % SAVE_STEPS == 0:
-                    save_checkpoint(student, optimizer, scaler, scheduler,
+                    save_checkpoint(student, optimizer, scheduler,
                                     global_step, phase_name,
                                     os.path.join(CKPT_DIR, f"{phase_name}_step{global_step}.pt"))
 
@@ -486,7 +479,7 @@ def run_phase(phase_idx, student, teacher,
               f"best WT103={best_ppl_wt:.2f}")
         if ppl_wt < best_ppl_wt:
             best_ppl_wt = ppl_wt
-            save_checkpoint(student, optimizer, scaler, scheduler,
+            save_checkpoint(student, optimizer, scheduler,
                             global_step, phase_name,
                             os.path.join(CKPT_DIR, f"best_{phase_name}.pt"))
 
@@ -548,8 +541,6 @@ def main():
         )
         print("Optimizer: AdamW fp32")
 
-    scaler = torch.amp.GradScaler("cuda")
-
     # Baseline eval before any training
     print("\nBaseline evaluation (before fine-tuning)...")
     set_performer_heads(student, PHASES[0][0])
@@ -563,7 +554,7 @@ def main():
     print(f"Teacher  (softmax baseline):     WT103 ppl={teacher_ppl_wt:.2f} | C4 ppl={teacher_ppl_c4:.2f}")
 
     # Resume handling — scheduler is built inside run_phase, so we only restore
-    # model + optimizer + scaler state here. Scheduler state is intentionally
+    # model + optimizer state here. Scheduler state is intentionally
     # not restored: run_phase fast-forwards it cleanly from global_step.
     resume_step = 0
     if args.resume:
@@ -574,7 +565,6 @@ def main():
                 layer.self_attn.performer_core.omega.copy_(ckpt["omegas"][key].to(DEVICE))
         student.load_state_dict(ckpt["model_state_dict"], strict=False)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        scaler.load_state_dict(ckpt["scaler_state_dict"])
         resume_step = ckpt["step"]
         print(f"  [resume] loaded phase={ckpt['phase']}, step={resume_step}")
 
@@ -594,7 +584,7 @@ def main():
         best_ppl, global_step = run_phase(
             phase_idx, student, teacher,
             train_loader, val_wt_loader, val_c4_loader,
-            optimizer, scaler,
+            optimizer,
             n_heads, unfreeze_mode, lr, n_epochs,
             phase_name,
             resume_step=global_step if phase_idx == args.start_phase else 0,
