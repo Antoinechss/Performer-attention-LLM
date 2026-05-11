@@ -567,7 +567,10 @@ def main():
             if key in ckpt["omegas"] and hasattr(layer.self_attn, "performer_core"):
                 layer.self_attn.performer_core.omega.copy_(ckpt["omegas"][key].to(DEVICE))
         student.load_state_dict(ckpt["model_state_dict"], strict=False)
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        except ValueError:
+            print("  [resume] optimizer state mismatch — skipping optimizer restore")
         resume_step = ckpt["step"]
         print(f"  [resume] loaded phase={ckpt['phase']}, step={resume_step}")
 
