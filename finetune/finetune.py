@@ -36,7 +36,7 @@ _HAS_BNB = False
 MODEL_ID   = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 DTYPE      = torch.bfloat16
 DEVICE     = "cuda"
-SEQ_LEN    = 512
+SEQ_LEN    = 256
 SEED       = 42
 
 # Distillation
@@ -48,15 +48,15 @@ MICRO_BATCH        = 4
 GRAD_ACCUM         = 2      # effective batch = 8
 SAVE_STEPS         = 100
 EVAL_STEPS         = 250
-MAX_TRAIN_SAMPLES  = 50_000  # ~25M tokens; enough for phases 3-4
+MAX_TRAIN_SAMPLES  = 20_000  # ~5M tokens at SEQ_LEN=256
 MAX_VAL_SAMPLES    = 300
 
 # Phases: (num_performer_heads, unfreeze_mode, lr, epochs)
 PHASES = [
-    (4,  "qk",   2e-5, 3),
-    (8,  "qkvo", 2e-5, 3),
-    (16, "qkvo", 1e-5, 3),
-    (32, "qkvo", 1e-5, 3),
+    (4,  "qk",   2e-5, 2),
+    (8,  "qkvo", 2e-5, 2),
+    (16, "qkvo", 1e-5, 2),
+    (32, "qkvo", 1e-5, 2),
 ]
 
 # Checkpoint directory: prefer RunPod network volume
