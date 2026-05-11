@@ -144,13 +144,8 @@ class PerformerAttentionCore(nn.Module):
             if _HAS_TRITON and q.device.type == "cuda" and not torch.is_grad_enabled():
                 out = _triton_scan(pq, pk, vf)
             else:
-                # Vectorized cumsum scan — autograd-compatible, no Python loop.
-                # Memory: O(N*M*D) but fully parallel on GPU.
-                kv_cs = torch.einsum("bhnm,bhnd->bhnmd", pk, vf).cumsum(dim=2)
-                k_cs  = pk.cumsum(dim=2)
-                num   = torch.einsum("bhnm,bhnmd->bhnd", pq, kv_cs)
-                denom = (pq * k_cs).sum(dim=-1, keepdim=True) + 1e-6
-                out   = num / denom
+                # Checkpointed Python scan — O(M*D) memory, autograd-compatible.
+                out = _python_scan_checkpointed(pq, pk, vf)
             out = out.to(q.dtype)
         else:
             # Decode: single new token against accumulated state

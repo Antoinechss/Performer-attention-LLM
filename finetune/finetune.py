@@ -44,8 +44,8 @@ ALPHA       = 0.5   # CE weight; (1-ALPHA) for KL
 TEMPERATURE = 2.0
 
 # Training
-MICRO_BATCH        = 4
-GRAD_ACCUM         = 2      # effective batch = 8
+MICRO_BATCH        = 2
+GRAD_ACCUM         = 4      # effective batch = 8
 SAVE_STEPS         = 100
 EVAL_STEPS         = 250
 MAX_TRAIN_SAMPLES  = 20_000  # ~5M tokens at SEQ_LEN=256
