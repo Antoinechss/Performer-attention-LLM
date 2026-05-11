@@ -467,9 +467,12 @@ def run_phase(phase_idx, student, teacher,
                     student.train()
 
                 if global_step % SAVE_STEPS == 0:
-                    save_checkpoint(student, optimizer, scheduler,
-                                    global_step, phase_name,
-                                    os.path.join(CKPT_DIR, f"{phase_name}_step{global_step}.pt"))
+                    new_ckpt = os.path.join(CKPT_DIR, f"{phase_name}_step{global_step}.pt")
+                    save_checkpoint(student, optimizer, scheduler, global_step, phase_name, new_ckpt)
+                    # Delete step checkpoints older than the previous one to save disk space
+                    old_ckpt = os.path.join(CKPT_DIR, f"{phase_name}_step{global_step - SAVE_STEPS}.pt")
+                    if os.path.exists(old_ckpt):
+                        os.remove(old_ckpt)
 
         # End of epoch eval
         ppl_wt, kl_wt = evaluate(student, teacher, val_wt_loader, "WT103")
