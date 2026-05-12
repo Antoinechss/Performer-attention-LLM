@@ -219,6 +219,7 @@ def save_checkpoint(model, optimizer, scheduler, step, phase_name, path):
         for i, layer in enumerate(model.model.layers)
         if hasattr(layer.self_attn, "performer_core")
     }
+    tmp_path = path + ".tmp"
     torch.save({
         "model_state_dict":     model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -226,7 +227,8 @@ def save_checkpoint(model, optimizer, scheduler, step, phase_name, path):
         "step":                 step,
         "phase":                phase_name,
         "omegas":               omegas,
-    }, path)
+    }, tmp_path)
+    os.replace(tmp_path, path)
     print(f"  [ckpt] saved {os.path.basename(path)}")
 
 
