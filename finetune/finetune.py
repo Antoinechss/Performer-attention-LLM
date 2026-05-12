@@ -55,8 +55,8 @@ MAX_VAL_SAMPLES    = 300
 PHASES = [
     (4,  "qk",   2e-5, 2),
     (8,  "qkvo", 2e-5, 2),
-    (16, "qkvo", 1e-5, 2),
-    (32, "qkvo", 1e-5, 2),
+    (16, "qkvo", 1e-5, 1),
+    (32, "qkvo", 1e-5, 1),
 ]
 
 # Checkpoint directory: prefer RunPod network volume
