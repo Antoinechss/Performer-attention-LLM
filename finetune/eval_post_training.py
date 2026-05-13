@@ -353,7 +353,7 @@ def extract_kernel_eigenvalues(model_std, model_perf, tokenizer, n_heads_perf, n
                 phi_q     = core.phi(q_s[:, :n_heads_perf], is_query=True)   # [1, K, N, M]
                 phi_k     = core.phi(k_s[:, :n_heads_perf], is_query=False)  # [1, K, N, M]
                 # Approx kernel: phi_q[i] · phi_k[j] averaged over performer heads
-                K_perf = torch.bmm(
+                K_perf = torch.mm(
                     phi_q.squeeze(0).mean(0),               # [N, M]
                     phi_k.squeeze(0).mean(0).transpose(0, 1)  # [M, N]
                 ).cpu().numpy()  # [N, N]
