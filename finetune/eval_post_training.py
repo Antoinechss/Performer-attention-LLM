@@ -293,12 +293,16 @@ def extract_kernel_eigenvalues(model_std, model_perf, tokenizer, n_heads_perf, n
                 hidden_perf = [None]
 
                 def hook_std(module, inp, kwargs_h, out):
-                    hs = kwargs_h.get("hidden_states") or (inp[0] if inp else None)
+                    hs = kwargs_h.get("hidden_states")
+                    if hs is None and inp:
+                        hs = inp[0]
                     if hs is not None:
                         hidden_std[0] = hs.detach()
 
                 def hook_perf(module, inp, kwargs_h, out):
-                    hs = kwargs_h.get("hidden_states") or (inp[0] if inp else None)
+                    hs = kwargs_h.get("hidden_states")
+                    if hs is None and inp:
+                        hs = inp[0]
                     if hs is not None:
                         hidden_perf[0] = hs.detach()
 
