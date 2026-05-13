@@ -124,6 +124,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=200, temperature=0.7, top_
             temperature=temperature,
             top_p=top_p,
             do_sample=True,
+            use_cache=False,
             pad_token_id=tokenizer.eos_token_id,
         )
     return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
