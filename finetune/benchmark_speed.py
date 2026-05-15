@@ -32,7 +32,7 @@ DTYPE    = torch.bfloat16
 WARMUP   = 5
 REPEATS  = 20
 
-SEQ_LENS     = [256, 512, 1024, 2048, 4096, 8192]
+SEQ_LENS     = [256, 512, 1024, 2048]
 M_SWEEP_VALS = [64, 128, 256, 512, 1024]
 M_SWEEP_N    = 2048  # fixed N for M sweep
 
