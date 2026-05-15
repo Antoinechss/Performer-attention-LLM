@@ -230,17 +230,18 @@ def run_m_sweep(ckpt_path, tokenizer, n_heads):
         base  = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
         model = patch_model(base, n_heads)
 
-        # Override omega with new sample at this M
+        # Load weights first (omega shape matches checkpoint's M=256)
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+
+        # Then replace performer_core with the target M and a fresh omega
         for i, layer in enumerate(model.model.layers):
             if hasattr(layer.self_attn, "performer_core"):
-                new_omega = _sample_orf(layer.self_attn.head_dim, m).to(DEVICE)
-                # Replace performer_core with one of the right size
-                layer.self_attn.performer_core = PerformerAttentionCore(
+                new_core = PerformerAttentionCore(
                     head_dim=layer.self_attn.head_dim, num_features=m
                 ).to(DEVICE).to(DTYPE)
-                layer.self_attn.performer_core.omega.copy_(new_omega)
+                new_core.omega.copy_(_sample_orf(layer.self_attn.head_dim, m).to(DEVICE))
+                layer.self_attn.performer_core = new_core
 
-        model.load_state_dict(ckpt["model_state_dict"], strict=False)
         model.eval()
 
         latency = measure_prefill(model, ids)
