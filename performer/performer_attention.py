@@ -32,7 +32,7 @@ def _sample_orf(head_dim, num_features, device=None):
 
 
 def _phi(x, omega, num_features, is_query=True):
-    """FAVOR+ feature map (matches Google's softmax_kernel_transformation).
+    """FAVOR+ positive exponential feature map.
 
     The max for numerical stability is taken on proj_x (= x @ omega)
     ALONE, not on proj_x - norm_x. This matches the Google reference.
@@ -45,12 +45,50 @@ def _phi(x, omega, num_features, is_query=True):
     proj_x = torch.einsum("bhnd,md->bhnm", x, omega)      # [B, H, N, M]
     norm_x = 0.5 * (x ** 2).sum(dim=-1, keepdim=True)      # [B, H, N, 1]
     if is_query:
-        # Max of proj_x over M dimension (last dim), per token
         stabilizer = proj_x.max(dim=-1, keepdim=True).values      # [B, H, N, 1]
     else:
-        # Max of proj_x over M and N dimensions, per (batch, head)
         stabilizer = proj_x.amax(dim=(-2, -1), keepdim=True)      # [B, H, 1, 1]
     return ratio * (torch.exp(proj_x - norm_x - stabilizer) + 1e-6)
+
+
+def _phi_trig(x, omega, num_features, is_query=True):
+    """Trigonometric RFF (Bochner's theorem) — unbiased estimator of any shift-invariant kernel.
+
+    Uses num_features/2 random projections and concatenates cos + sin components,
+    giving num_features output features. Unlike FAVOR+, output values can be negative,
+    so the scan denominator may be small — works best with moderate head scaling.
+    """
+    omega = omega.to(device=x.device, dtype=x.dtype)
+    half_m = num_features // 2
+    omega_half = omega[:half_m]
+    ratio = 1.0 / math.sqrt(half_m)
+    proj_x = torch.einsum("bhnd,md->bhnm", x, omega_half)  # [B, H, N, M/2]
+    return ratio * torch.cat([torch.cos(proj_x), torch.sin(proj_x)], dim=-1)  # [B, H, N, M]
+
+
+def _phi_hyp(x, omega, num_features, is_query=True):
+    """Hyperbolic feature map — lower variance alternative to positive exponential.
+
+    Concatenates exp(+proj - norm) and exp(-proj - norm), yielding 2*M features.
+    Both halves are strictly positive so the causal scan denominator is well-conditioned.
+    Approximates the same kernel as FAVOR+ but with lower variance estimates.
+    Output dimension is 2*num_features; the scan handles arbitrary M dynamically.
+    """
+    omega = omega.to(device=x.device, dtype=x.dtype)
+    ratio = 1.0 / math.sqrt(2 * num_features)             # normalise over 2*M output features
+    proj_x = torch.einsum("bhnd,md->bhnm", x, omega)      # [B, H, N, M]
+    norm_x = 0.5 * (x ** 2).sum(dim=-1, keepdim=True)     # [B, H, N, 1]
+    return ratio * torch.cat([
+        torch.exp( proj_x - norm_x) + 1e-6,
+        torch.exp(-proj_x - norm_x) + 1e-6,
+    ], dim=-1)                                             # [B, H, N, 2*M]
+
+
+_KERNEL_FNS = {
+    "favor": _phi,
+    "trig":  _phi_trig,
+    "hyp":   _phi_hyp,
+}
 
 
 def _python_scan(phi_q, phi_k, v):
@@ -83,12 +121,15 @@ def _python_scan_checkpointed(phi_q, phi_k, v):
 class PerformerAttention(nn.Module):
     """Standalone Performer attention with Q/K/V projections (for testing)."""
 
-    def __init__(self, dim, num_heads, head_dim, num_features):
+    def __init__(self, dim, num_heads, head_dim, num_features, kernel="favor"):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.num_features = num_features
+        if kernel not in _KERNEL_FNS:
+            raise ValueError(f"Unknown kernel '{kernel}'. Choose from: {list(_KERNEL_FNS)}")
+        self.kernel = kernel
 
         self.register_buffer("omega", _sample_orf(head_dim, num_features))
 
@@ -99,7 +140,7 @@ class PerformerAttention(nn.Module):
         self.out_proj = nn.Linear(inner_dim, dim)
 
     def phi(self, x, is_query=True):
-        return _phi(x, self.omega, self.num_features, is_query)
+        return _KERNEL_FNS[self.kernel](x, self.omega, self.num_features, is_query)
 
     def forward(self, x):
         B, N, _ = x.shape
@@ -122,16 +163,25 @@ class PerformerAttention(nn.Module):
 
 
 class PerformerAttentionCore(nn.Module):
-    """Core FAVOR+ attention — no projections, plugs into any architecture."""
+    """Core FAVOR+ attention — no projections, plugs into any architecture.
 
-    def __init__(self, head_dim, num_features):
+    Args:
+        head_dim:     dimension of each attention head
+        num_features: number of random features M (default 256)
+        kernel:       feature map — 'favor' (default), 'trig', or 'hyp'
+    """
+
+    def __init__(self, head_dim, num_features, kernel="favor"):
         super().__init__()
         self.head_dim = head_dim
         self.num_features = num_features
+        if kernel not in _KERNEL_FNS:
+            raise ValueError(f"Unknown kernel '{kernel}'. Choose from: {list(_KERNEL_FNS)}")
+        self.kernel = kernel
         self.register_buffer("omega", _sample_orf(head_dim, num_features), persistent=True)
 
     def phi(self, x, is_query=True):
-        return _phi(x, self.omega, self.num_features, is_query)
+        return _KERNEL_FNS[self.kernel](x, self.omega, self.num_features, is_query)
 
     def forward(self, q, k, v):
         scale = q.shape[-1] ** -0.25

@@ -26,7 +26,7 @@ DTYPE    = torch.bfloat16
 # ── MixedPerformerAttention (same as finetune.py) ─────────────────────────────
 
 class MixedPerformerAttention(torch.nn.Module):
-    def __init__(self, original_attn, num_performer_heads):
+    def __init__(self, original_attn, num_performer_heads, kernel="favor"):
         super().__init__()
         self.head_dim             = original_attn.head_dim
         self.num_heads            = original_attn.config.num_attention_heads
@@ -39,7 +39,7 @@ class MixedPerformerAttention(torch.nn.Module):
         self.k_proj = original_attn.k_proj
         self.v_proj = original_attn.v_proj
         self.o_proj = original_attn.o_proj
-        self.performer_core = PerformerAttentionCore(head_dim=self.head_dim, num_features=256)
+        self.performer_core = PerformerAttentionCore(head_dim=self.head_dim, num_features=256, kernel=kernel)
         self.config    = original_attn.config
         self.layer_idx = original_attn.layer_idx
         self.is_causal = True
@@ -91,25 +91,25 @@ class MixedPerformerAttention(torch.nn.Module):
         return self.o_proj(attn_out), None, None
 
 
-def patch_model(model, num_performer_heads):
+def patch_model(model, num_performer_heads, kernel="favor"):
     for layer in model.model.layers:
-        layer.self_attn = MixedPerformerAttention(layer.self_attn, num_performer_heads)
+        layer.self_attn = MixedPerformerAttention(layer.self_attn, num_performer_heads, kernel=kernel)
     return model
 
 
-def load_checkpoint(ckpt_path):
+def load_checkpoint(ckpt_path, kernel="favor"):
     ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     phase = ckpt["phase"]
     n_heads = int(phase.split("_K")[1].split("_")[0])
     base = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
-    model = patch_model(base, n_heads)
+    model = patch_model(base, n_heads, kernel=kernel)
     for i, layer in enumerate(model.model.layers):
         key = f"layer_{i}"
         if key in ckpt["omegas"] and hasattr(layer.self_attn, "performer_core"):
             layer.self_attn.performer_core.omega.copy_(ckpt["omegas"][key].to(DEVICE))
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
-    print(f"  Loaded {os.path.basename(ckpt_path)} — {n_heads}/32 performer heads")
+    print(f"  Loaded {os.path.basename(ckpt_path)} — {n_heads}/32 performer heads, kernel={kernel}")
     return model, n_heads, phase
 
 
@@ -175,6 +175,15 @@ def main():
     parser.add_argument("--phase", default=None, help="Specific phase to load, e.g. best_phase2_K8_QKVO")
     parser.add_argument("--max_new_tokens", type=int, default=150)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument(
+        "--kernel", default="favor", choices=["favor", "trig", "hyp"],
+        help=(
+            "Feature map kernel for Performer heads: "
+            "'favor' (default) = positive exponential FAVOR+; "
+            "'trig' = trigonometric RFF (Bochner); "
+            "'hyp' = hyperbolic (lower-variance positive exponential)."
+        ),
+    )
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -193,7 +202,7 @@ def main():
         ]
         ckpt_files = [f for f in ckpt_files if os.path.exists(f)]
 
-    # Teacher baseline
+    # Teacher baseline (always softmax — kernel flag only applies to performer heads)
     print("\nLoading teacher (softmax baseline)...")
     teacher = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=DTYPE, device_map=DEVICE)
     teacher.eval()
@@ -214,8 +223,8 @@ def main():
     # Per-checkpoint eval
     for ckpt_path in ckpt_files:
         print(f"\n{'='*70}")
-        model, n_heads, phase = load_checkpoint(ckpt_path)
-        print(f"CHECKPOINT: {phase} ({n_heads}/32 performer heads)")
+        model, n_heads, phase = load_checkpoint(ckpt_path, kernel=args.kernel)
+        print(f"CHECKPOINT: {phase} ({n_heads}/32 performer heads, kernel={args.kernel})")
         print("="*70)
 
         ppl = compute_ppl(model, tokenizer, VAL_TEXTS)
