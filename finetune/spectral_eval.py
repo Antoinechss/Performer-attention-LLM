@@ -171,7 +171,7 @@ def get_qk_at_layer(model, input_ids, layer_idx):
 
     handle.remove()
 
-    hs       = captured["hs"].float()
+    hs       = captured["hs"].to(DTYPE)
     attn     = layer.self_attn
     B, N, _  = hs.shape
     num_heads = attn.config.num_attention_heads
@@ -179,8 +179,8 @@ def get_qk_at_layer(model, input_ids, layer_idx):
     num_groups = num_heads // num_kv
     head_dim  = attn.head_dim
 
-    q = attn.q_proj(hs).view(B, N, num_heads, head_dim).transpose(1, 2)
-    k = attn.k_proj(hs).view(B, N, num_kv,    head_dim).transpose(1, 2)
+    q = attn.q_proj(hs).view(B, N, num_heads, head_dim).transpose(1, 2).float()
+    k = attn.k_proj(hs).view(B, N, num_kv,    head_dim).transpose(1, 2).float()
     if num_groups > 1:
         k = k.repeat_interleave(num_groups, dim=1)
 
