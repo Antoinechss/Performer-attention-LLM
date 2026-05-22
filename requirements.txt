@@ -1,0 +1,16 @@
+# Core ML
+torch>=2.1.0
+numpy>=1.24.0
+
+# HuggingFace stack
+transformers>=4.40.0
+datasets>=2.18.0
+accelerate>=0.27.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+
+# Plotting
+matplotlib>=3.7.0
+
+# Triton (CUDA/Linux only — skip on macOS)
+# triton>=2.2.0
