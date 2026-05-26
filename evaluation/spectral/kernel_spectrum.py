@@ -298,18 +298,21 @@ def extract_all_metrics(model, tokenizer, layer_idx, mode, n_performer_heads=Non
 
 # ── Pretty printing ───────────────────────────────────────────────────────────
 
-def print_model_summary(label, layer_results):
+def print_model_summary(label, model_key, layer_results):
     print(f"\n  {label}")
     print(f"  {'Layer':<8} {'λ₁':>10} {'λ₂':>10} {'σ₁':>10} {'Asym%':>8} {'r_eff':>8} {'||K||_F':>10}")
     print(f"  {'-'*64}")
     for layer_idx in TARGET_LAYERS:
-        d = layer_results[str(layer_idx)]
+        d = layer_results[str(layer_idx)].get(model_key)
+        if d is None:
+            print(f"  layer {layer_idx:<3}  [not available]")
+            continue
         eigs = d["eigenvalues"]
         svs  = d["singular_values"]
         print(f"  layer {layer_idx:<3} "
-              f"{eigs[0]:>10.4f} "
-              f"{eigs[1]:>10.4f} "
-              f"{svs[0]:>10.4f} "
+              f"{eigs[0]:>10.4e} "
+              f"{eigs[1]:>10.4e} "
+              f"{svs[0]:>10.4e} "
               f"{d['asymmetry_rel']*100:>7.2f}% "
               f"{d['effective_rank']:>8.2f} "
               f"{d['frobenius_norm']:>10.4f}")
@@ -515,14 +518,14 @@ def main():
     print(f"\n{SEP}")
     print("SUMMARY — Softmax")
     print(SEP)
-    print_model_summary("Softmax teacher", {str(l): results[str(l)] for l in TARGET_LAYERS})
+    print_model_summary("Softmax teacher", "softmax", results)
 
     for key in ["no_finetune", "phase1_4heads", "phase2_8heads", "phase3_16heads", "phase4_32heads"]:
         if any(key in results[str(l)] for l in TARGET_LAYERS):
             print(f"\n{SEP}")
             print(f"SUMMARY — {key}")
             print(SEP)
-            print_model_summary(key, {str(l): results[str(l)] for l in TARGET_LAYERS})
+            print_model_summary(key, key, results)
 
     # ── Hoffmann-Wielandt table ───────────────────────────────────────────────
     print(f"\n{SEP}")
