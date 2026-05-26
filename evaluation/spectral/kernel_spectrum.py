@@ -264,7 +264,12 @@ def extract_all_metrics(model, tokenizer, layer_idx, mode, n_performer_heads=Non
         else:
             K = gram_favor_raw(q, k, attn, n_performer_heads)
 
-        K_avg = K if K_avg is None else K_avg + K
+        if K_avg is None:
+            K_avg = K
+        elif K_avg.shape == K.shape:
+            K_avg = K_avg + K
+        else:
+            K_avg = K  # reset if shape mismatch (different seq len)
 
         eigs = compute_eigenvalues(K)
         svs  = compute_singular_values(K)
