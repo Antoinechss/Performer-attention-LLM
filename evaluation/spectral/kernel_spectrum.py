@@ -29,8 +29,8 @@ from performer_attention import PerformerAttentionCore
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID      = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-DEVICE        = "cuda"
-DTYPE         = torch.bfloat16
+DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE         = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 TARGET_LAYERS = [0, 5, 10, 15, 21]
 N_SAMPLES     = 5
 SEQ_LEN       = 128
@@ -153,7 +153,10 @@ def get_qk(model, input_ids, layer_idx):
 
     handle = model.model.layers[layer_idx].self_attn.register_forward_hook(hook, with_kwargs=True)
     with torch.no_grad():
-        with torch.amp.autocast("cuda", dtype=DTYPE):
+        if DEVICE == "cuda":
+            with torch.amp.autocast("cuda", dtype=DTYPE):
+                model(input_ids=input_ids, use_cache=False)
+        else:
             model(input_ids=input_ids, use_cache=False)
     handle.remove()
 
